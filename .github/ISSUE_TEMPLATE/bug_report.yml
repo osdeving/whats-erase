@@ -1,0 +1,52 @@
+name: Relatar um bug
+description: Informe um comportamento reproduzível sem incluir dados privados.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Obrigado pelo relato. Remova API keys, cookies, QR Codes, JIDs, IDs reais e conteúdo de conversas. Para vulnerabilidades, use o canal privado descrito em SECURITY.md.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: O que aconteceu?
+      description: Descreva o resultado observado e o esperado.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Como reproduzir?
+      placeholder: |
+        1. Configure...
+        2. Execute...
+        3. Observe...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Versão ou commit
+      placeholder: v0.1.0 ou SHA
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Ambiente
+      description: Sistema operacional, Docker/Compose e navegador. Não cole o `.env`.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Verificação de privacidade
+      options:
+        - label: Removi credenciais, QR Codes, JIDs, IDs e conteúdo de mensagens.
+          required: true

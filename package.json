@@ -1,0 +1,40 @@
+{
+  "name": "whats-erase",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agendador pessoal de exclusao de mensagens enviadas via Evolution API",
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/osdeving/whats-erase.git"
+  },
+  "homepage": "https://github.com/osdeving/whats-erase#readme",
+  "bugs": {
+    "url": "https://github.com/osdeving/whats-erase/issues"
+  },
+  "keywords": [
+    "whatsapp",
+    "evolution-api",
+    "self-hosted",
+    "automation"
+  ],
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c cyan,magenta \"npm run dev -w @whats-erase/server\" \"npm run dev -w @whats-erase/web\"",
+    "build": "npm run build -w @whats-erase/web && npm run build -w @whats-erase/server",
+    "lint:md": "markdownlint-cli2 README.md SECURITY.md CONTRIBUTING.md",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "check": "npm run lint:md && npm run typecheck && npm run test && npm run build",
+    "start": "npm run start -w @whats-erase/server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "markdownlint-cli2": "^0.23.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
