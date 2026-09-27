@@ -33,14 +33,52 @@ CREATE TABLE IF NOT EXISTS rules (
   chat_kind text NOT NULL CHECK (chat_kind IN ('all', 'direct', 'group', 'exact')),
   chat_jid text,
   message_type text NOT NULL CHECK (message_type IN ('all', 'text', 'image', 'video', 'audio', 'document', 'sticker', 'other')),
+  content_filter text NOT NULL DEFAULT 'any',
+  content_pattern text,
+  case_sensitive boolean NOT NULL DEFAULT false,
   action text NOT NULL CHECK (action IN ('delete', 'keep')),
   delay_seconds integer CHECK (delay_seconds BETWEEN 10 AND 604800),
   enabled boolean NOT NULL DEFAULT true,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   CHECK ((chat_kind = 'exact' AND chat_jid IS NOT NULL AND length(chat_jid) > 0) OR (chat_kind <> 'exact' AND chat_jid IS NULL)),
-  CHECK ((action = 'delete' AND delay_seconds IS NOT NULL) OR (action = 'keep' AND delay_seconds IS NULL))
+  CHECK ((action = 'delete' AND delay_seconds IS NOT NULL) OR (action = 'keep' AND delay_seconds IS NULL)),
+  CONSTRAINT rules_content_filter_check CHECK (content_filter IN ('any', 'startsWith', 'notStartsWith', 'regex')),
+  CONSTRAINT rules_content_pattern_check CHECK (
+    (content_filter = 'any' AND content_pattern IS NULL)
+    OR
+    (content_filter <> 'any' AND content_pattern IS NOT NULL AND char_length(content_pattern) BETWEEN 1 AND 256)
+  )
 );
+
+-- Regras criadas antes dos filtros de conteudo continuam equivalentes: qualquer
+-- conteudo, sem distinguir maiusculas/minusculas. Mensagens nunca sao copiadas
+-- para estas colunas; somente o criterio configurado pelo usuario e armazenado.
+ALTER TABLE rules
+  ADD COLUMN IF NOT EXISTS content_filter text NOT NULL DEFAULT 'any',
+  ADD COLUMN IF NOT EXISTS content_pattern text,
+  ADD COLUMN IF NOT EXISTS case_sensitive boolean NOT NULL DEFAULT false;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'rules'::regclass AND conname = 'rules_content_filter_check'
+  ) THEN
+    ALTER TABLE rules ADD CONSTRAINT rules_content_filter_check
+      CHECK (content_filter IN ('any', 'startsWith', 'notStartsWith', 'regex'));
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'rules'::regclass AND conname = 'rules_content_pattern_check'
+  ) THEN
+    ALTER TABLE rules ADD CONSTRAINT rules_content_pattern_check CHECK (
+      (content_filter = 'any' AND content_pattern IS NULL)
+      OR
+      (content_filter <> 'any' AND content_pattern IS NOT NULL AND char_length(content_pattern) BETWEEN 1 AND 256)
+    );
+  END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS deletion_jobs (
   id uuid PRIMARY KEY,

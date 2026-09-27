@@ -3,6 +3,8 @@ import { api, errorMessage, fetchQr, qrFromPayload } from './api';
 import type {
   AuthStatus,
   ChatKind,
+  ContentFilter,
+  EvolutionGroup,
   Job,
   LogLevel,
   MessageType,
@@ -130,7 +132,17 @@ const initialSettings: Settings = {
 };
 
 const initialRule: Omit<Rule, 'id'> = {
-  name: '', priority: 100, chatKind: 'all', chatJid: '', messageType: 'all', action: 'delete', delaySeconds: 86400,
+  name: '',
+  priority: 100,
+  chatKind: 'exact',
+  chatJid: '',
+  messageType: 'all',
+  contentFilter: 'any',
+  contentPattern: null,
+  caseSensitive: false,
+  action: 'delete',
+  delaySeconds: 86400,
+  enabled: true,
 };
 
 function asList<T>(value: unknown, key: string): T[] {
@@ -493,7 +505,8 @@ function HealthRow({ title, description, health, warning = false }: { title: str
 
 function JobSummary({ job }: { job: Job }) {
   const meta = statusMeta(job.status);
-  return <div className="activity-item"><span className={`activity-item__icon ${meta.tone}`}><Icon name={meta.icon} /></span><div className="activity-item__main"><p><strong>{displayJid(job.remoteJid)}</strong><span>· {messageTypeLabel(job.messageType)}</span></p><small>{job.simulateOnly && ['pending', 'retry'].includes(job.status) ? `Simulação protegida · execução ${formatRelative(job.deleteAt)}` : ['pending', 'retry'].includes(job.status) ? `Exclusão ${formatRelative(job.deleteAt)}` : meta.label}</small></div><span className={`status-chip status-chip--${meta.tone}`}>{meta.label}</span></div>;
+  const ruleName = job.ruleSnapshot?.ruleName;
+  return <div className="activity-item"><span className={`activity-item__icon ${meta.tone}`}><Icon name={meta.icon} /></span><div className="activity-item__main"><p><strong>{displayJid(job.remoteJid)}</strong><span>· {messageTypeLabel(job.messageType)}</span></p><small>{ruleName && `Regra: ${ruleName} · `}{job.simulateOnly && ['pending', 'retry'].includes(job.status) ? `Simulação protegida · execução ${formatRelative(job.deleteAt)}` : ['pending', 'retry'].includes(job.status) ? `Exclusão ${formatRelative(job.deleteAt)}` : meta.label}</small></div><span className={`status-chip status-chip--${meta.tone}`}>{meta.label}</span></div>;
 }
 
 function Connection({ notify, onStatusChange }: { notify: (kind: Toast['kind'], text: string) => void; onStatusChange: () => void }) {
@@ -613,9 +626,10 @@ function Connection({ notify, onStatusChange }: { notify: (kind: Toast['kind'], 
       </section>
 
       <section className="card settings-section">
-        <div className="section-heading"><span className="section-heading__icon section-heading__icon--violet"><Icon name="rules" /></span><div><span className="eyebrow">comportamento</span><h2>Preferências do daemon</h2><p>Valores padrão usados quando nenhuma regra mais específica combinar.</p></div></div>
-        <div className="form-grid form-grid--three">
-          <label className="field"><span>Atraso padrão (segundos)</span><input type="number" min="10" max="169200" step="1" value={settings.defaultDelaySeconds} onChange={(event) => change('defaultDelaySeconds', Number(event.target.value))} required /><small>{formatDuration(settings.defaultDelaySeconds)} · máximo 47h</small></label>
+        <div className="section-heading"><span className="section-heading__icon section-heading__icon--violet"><Icon name="rules" /></span><div><span className="eyebrow">comportamento seguro</span><h2>Preferências do daemon</h2><p>Só mensagens que correspondem a uma regra de exclusão são agendadas.</p></div></div>
+        <div className="safe-default-notice"><Icon name="shield" /><div><strong>Sem regra correspondente, a mensagem é mantida</strong><p>O WhatsErase trabalha em modo opt-in: crie uma regra explícita para cada grupo, conversa ou conteúdo que deseja apagar.</p></div></div>
+        <div className="form-grid form-grid--three behavior-grid">
+          <label className="field"><span>Atraso sugerido para novas regras</span><input type="number" min="10" max="169200" step="1" value={settings.defaultDelaySeconds} onChange={(event) => change('defaultDelaySeconds', Number(event.target.value))} required /><small>{formatDuration(settings.defaultDelaySeconds)} · não apaga nada sem uma regra</small></label>
           <label className="field"><span>Máximo de tentativas</span><input type="number" min="1" max="10" step="1" value={settings.maxAttempts} onChange={(event) => change('maxAttempts', Number(event.target.value))} required /><small>Em caso de falha temporária.</small></label>
           <div className="field"><span>Modo de execução</span><label className={`toggle-card ${settings.dryRun ? 'active' : ''}`}><input type="checkbox" checked={settings.dryRun} onChange={(event) => change('dryRun', event.target.checked)} /><span className="switch" aria-hidden="true"><i /></span><span><strong>Modo simulação</strong><small>{settings.dryRun ? 'Não apaga mensagens' : 'Exclusões reais ativas'}</small></span></label></div>
           <label className="field field--wide"><span>URL do webhook</span><div className="input-with-copy"><input value={settings.webhookUrl} readOnly placeholder="Gerada pelo servidor" /><button type="button" className="button button--ghost button--small" onClick={() => { void navigator.clipboard?.writeText(settings.webhookUrl); notify('success', 'URL copiada.'); }} disabled={!settings.webhookUrl}>Copiar</button></div><small>Configure esta URL nos eventos de mensagens da sua instância.</small></label>
@@ -628,6 +642,10 @@ function Connection({ notify, onStatusChange }: { notify: (kind: Toast['kind'], 
 
 function Rules({ notify }: { notify: (kind: Toast['kind'], text: string) => void }) {
   const [rules, setRules] = useState<Rule[]>([]);
+  const [groups, setGroups] = useState<EvolutionGroup[]>([]);
+  const [groupsLoading, setGroupsLoading] = useState(true);
+  const [groupsError, setGroupsError] = useState('');
+  const [suggestedDelay, setSuggestedDelay] = useState(initialRule.delaySeconds ?? 86400);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [editing, setEditing] = useState<Rule | Omit<Rule, 'id'> | null>(null);
@@ -637,12 +655,40 @@ function Rules({ notify }: { notify: (kind: Toast['kind'], text: string) => void
     setLoading(true); setError('');
     try {
       const response = asList<Rule>(await api<unknown>('/api/rules'), 'rules');
-      setRules(response.sort((a, b) => b.priority - a.priority));
+      setRules(response
+        .map((rule) => ({
+          ...rule,
+          contentFilter: rule.contentFilter ?? 'any',
+          contentPattern: rule.contentPattern ?? null,
+          caseSensitive: rule.caseSensitive ?? false,
+        }))
+        .sort((a, b) => b.priority - a.priority));
     } catch (loadError) {
       setError(errorMessage(loadError));
     } finally { setLoading(false); }
   }, []);
-  useEffect(() => { void load(); }, [load]);
+
+  const loadGroups = useCallback(async () => {
+    setGroupsLoading(true); setGroupsError('');
+    try {
+      const response = asList<EvolutionGroup>(await api<unknown>('/api/evolution/groups'), 'groups');
+      setGroups(response.sort((a, b) => a.name.localeCompare(b.name, 'pt-BR')));
+    } catch (loadError) {
+      setGroupsError(errorMessage(loadError));
+    } finally { setGroupsLoading(false); }
+  }, []);
+
+  useEffect(() => {
+    void load();
+    void loadGroups();
+    void api<Settings>('/api/settings')
+      .then((settings) => setSuggestedDelay(settings.defaultDelaySeconds))
+      .catch(() => undefined);
+  }, [load, loadGroups]);
+
+  function newRule() {
+    setEditing({ ...initialRule, delaySeconds: suggestedDelay });
+  }
 
   async function saveRule(rule: Rule | Omit<Rule, 'id'>) {
     setSaving(true);
@@ -654,6 +700,9 @@ function Rules({ notify }: { notify: (kind: Toast['kind'], text: string) => void
         chatKind: rule.chatKind,
         chatJid: rule.chatKind === 'exact' ? rule.chatJid : null,
         messageType: rule.messageType,
+        contentFilter: rule.contentFilter,
+        contentPattern: rule.contentFilter === 'any' ? null : rule.contentPattern,
+        caseSensitive: rule.contentFilter === 'any' ? false : rule.caseSensitive,
         action: rule.action,
         delaySeconds: rule.action === 'delete' ? rule.delaySeconds : null,
         enabled: rule.enabled ?? true,
@@ -679,32 +728,66 @@ function Rules({ notify }: { notify: (kind: Toast['kind'], text: string) => void
   return (
     <div className="page-flow">
       <section className="rules-intro">
-        <div><span className="eyebrow">proteções sempre vencem</span><h2>Seu manual de limpeza</h2><p>Regras “manter” protegem a mensagem. Entre regras de exclusão, o maior número tem prioridade.</p></div>
-        <button className="button button--primary" onClick={() => setEditing({ ...initialRule })}><Icon name="plus" />Nova regra</button>
+        <div><span className="eyebrow">controle explícito</span><h2>Seu manual de limpeza</h2><p>O nome é apenas um rótulo. Escolha o grupo e os filtros dentro da regra. Sem combinação, a mensagem é mantida.</p></div>
+        <button className="button button--primary" onClick={newRule}><Icon name="plus" />Nova regra</button>
       </section>
+      <div className="rules-safety-note"><Icon name="shield" /><p><strong>Modo opt-in ativo.</strong> Regras “manter” sempre protegem; entre regras de exclusão, o maior número de prioridade vence.</p></div>
       {loading && <RulesSkeleton />}
       {!loading && error && <InlineError message={error} retry={() => void load()} />}
-      {!loading && !error && rules.length === 0 && <div className="card"><EmptyState icon="rules" title="Nenhuma regra ainda" description="Crie sua primeira regra para decidir quando mensagens devem sair do ar." action={<button className="button button--primary" onClick={() => setEditing({ ...initialRule })}><Icon name="plus" />Criar primeira regra</button>} /></div>}
-      {!loading && !error && rules.length > 0 && <div className="rule-list">{rules.map((rule, index) => <RuleCard key={rule.id} rule={rule} position={index + 1} edit={() => setEditing(rule)} remove={() => void remove(rule)} />)}</div>}
-      {editing && <RuleEditor value={editing} saving={saving} onClose={() => setEditing(null)} onSave={(rule) => void saveRule(rule)} />}
+      {!loading && !error && rules.length === 0 && <div className="card"><EmptyState icon="rules" title="Nenhuma regra ainda" description="Nenhuma mensagem será apagada. Crie uma regra explícita para começar." action={<button className="button button--primary" onClick={newRule}><Icon name="plus" />Criar primeira regra</button>} /></div>}
+      {!loading && !error && rules.length > 0 && <div className="rule-list">{rules.map((rule, index) => <RuleCard key={rule.id} rule={rule} groupName={groupNameForJid(groups, rule.chatJid)} position={index + 1} edit={() => setEditing(rule)} remove={() => void remove(rule)} />)}</div>}
+      {editing && <RuleEditor value={editing} groups={groups} groupsLoading={groupsLoading} groupsError={groupsError} retryGroups={() => void loadGroups()} saving={saving} onClose={() => setEditing(null)} onSave={(rule) => void saveRule(rule)} />}
     </div>
   );
 }
 
-function RuleCard({ rule, position, edit, remove }: { rule: Rule; position: number; edit: () => void; remove: () => void }) {
+function RuleCard({ rule, groupName, position, edit, remove }: { rule: Rule; groupName?: string; position: number; edit: () => void; remove: () => void }) {
   return (
-    <article className={`rule-card ${rule.action === 'keep' ? 'rule-card--keep' : ''}`}>
+    <article className={`rule-card ${rule.action === 'keep' ? 'rule-card--keep' : ''} ${rule.enabled === false ? 'rule-card--disabled' : ''}`}>
       <div className="rule-card__order"><span>{position.toString().padStart(2, '0')}</span><small>prior. {rule.priority}</small></div>
-      <div className="rule-card__body"><div className="rule-card__title"><span className={`rule-action rule-action--${rule.action}`}><Icon name={rule.action === 'delete' ? 'trash' : 'shield'} />{rule.action === 'delete' ? 'apagar' : 'manter'}</span><h3>{rule.name}</h3></div><div className="rule-sentence">Para <strong>{chatKindLabel(rule.chatKind, rule.chatJid)}</strong>, em mensagens de <strong>{messageTypeLabel(rule.messageType)}</strong>, <strong>{rule.action === 'keep' ? 'nunca apagar' : `apagar após ${formatDuration(rule.delaySeconds ?? 0)}`}</strong>.</div></div>
+      <div className="rule-card__body">
+        <div className="rule-card__title">
+          <span className={`rule-action rule-action--${rule.action}`}><Icon name={rule.action === 'delete' ? 'trash' : 'shield'} />{rule.action === 'delete' ? 'apagar' : 'manter'}</span>
+          {rule.enabled === false && <span className="rule-action rule-action--disabled">pausada</span>}
+          <h3>{rule.name}</h3>
+        </div>
+        <div className="rule-sentence">Para <strong>{chatKindLabel(rule.chatKind, rule.chatJid, groupName)}</strong>, em mensagens de <strong>{messageTypeLabel(rule.messageType)}</strong>{rule.contentFilter !== 'any' && <>, quando o conteúdo <strong>{contentFilterLabel(rule.contentFilter, rule.contentPattern, rule.caseSensitive)}</strong></>}, <strong>{rule.action === 'keep' ? 'nunca apagar' : `apagar após ${formatDuration(rule.delaySeconds ?? 0)}`}</strong>.</div>
+      </div>
       <div className="rule-card__actions"><button className="button button--small button--ghost" onClick={edit}>Editar</button><button className="icon-button icon-button--danger" onClick={remove} aria-label={`Excluir regra ${rule.name}`}><Icon name="trash" /></button></div>
     </article>
   );
 }
 
-function RuleEditor({ value, saving, onClose, onSave }: { value: Rule | Omit<Rule, 'id'>; saving: boolean; onClose: () => void; onSave: (value: Rule | Omit<Rule, 'id'>) => void }) {
-  const [draft, setDraft] = useState(value);
+type RuleEditorProps = {
+  value: Rule | Omit<Rule, 'id'>;
+  groups: EvolutionGroup[];
+  groupsLoading: boolean;
+  groupsError: string;
+  retryGroups: () => void;
+  saving: boolean;
+  onClose: () => void;
+  onSave: (value: Rule | Omit<Rule, 'id'>) => void;
+};
+
+const scopeOptions: Array<{ value: ChatKind; label: string; hint: string; risky?: boolean }> = [
+  { value: 'exact', label: 'Um grupo específico', hint: 'Mais seguro: escolha o grupo abaixo.' },
+  { value: 'group', label: 'Todos os grupos', hint: 'Vale para qualquer grupo.' },
+  { value: 'direct', label: 'Conversas individuais', hint: 'Vale para contatos, não grupos.' },
+  { value: 'all', label: 'Todas as conversas', hint: 'Escopo amplo; use com cuidado.', risky: true },
+];
+
+function RuleEditor({ value, groups, groupsLoading, groupsError, retryGroups, saving, onClose, onSave }: RuleEditorProps) {
+  const [draft, setDraft] = useState({
+    ...value,
+    contentFilter: value.contentFilter ?? 'any',
+    contentPattern: value.contentPattern ?? null,
+    caseSensitive: value.caseSensitive ?? false,
+    enabled: value.enabled ?? true,
+  });
   const [error, setError] = useState('');
   const isEditing = 'id' in value;
+  const selectedGroupKnown = groups.some((group) => group.jid === draft.chatJid);
+
   useEffect(() => {
     const close = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(); };
     document.addEventListener('keydown', close);
@@ -713,29 +796,71 @@ function RuleEditor({ value, saving, onClose, onSave }: { value: Rule | Omit<Rul
 
   function change<K extends keyof Omit<Rule, 'id'>>(key: K, changed: Omit<Rule, 'id'>[K]) {
     setDraft((current) => ({ ...current, [key]: changed }));
+    setError('');
   }
+
   function submit(event: FormEvent) {
     event.preventDefault();
-    if (!draft.name.trim()) return setError('Dê um nome para a regra.');
-    if (draft.chatKind === 'exact' && !draft.chatJid?.trim()) return setError('Informe o JID da conversa específica.');
-    onSave({ ...draft, chatJid: draft.chatKind === 'exact' ? draft.chatJid?.trim() : null });
+    if (!draft.name.trim()) return setError('Dê um nome para a regra. Ele serve apenas como rótulo.');
+    if (draft.chatKind === 'exact' && !draft.chatJid?.trim()) return setError('Escolha o grupo específico em que a regra deve atuar.');
+    const pattern = draft.contentPattern ?? '';
+    if (draft.contentFilter !== 'any' && !pattern) return setError('Informe o texto ou a expressão usados no filtro de conteúdo.');
+    if (draft.contentFilter === 'regex') {
+      try {
+        new RegExp(pattern, draft.caseSensitive ? '' : 'i');
+      } catch {
+        return setError('A expressão regular não é válida. Revise os parênteses, colchetes e barras.');
+      }
+    }
+    onSave({
+      ...draft,
+      name: draft.name.trim(),
+      chatJid: draft.chatKind === 'exact' ? draft.chatJid?.trim() : null,
+      contentPattern: draft.contentFilter === 'any' ? null : pattern,
+      caseSensitive: draft.contentFilter === 'any' ? false : draft.caseSensitive,
+    });
   }
+
   return (
     <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <section className="modal" role="dialog" aria-modal="true" aria-labelledby="rule-title">
-        <header><div><span className="eyebrow">{isEditing ? 'editar automação' : 'nova automação'}</span><h2 id="rule-title">{isEditing ? 'Ajustar regra' : 'Criar uma regra'}</h2></div><button className="icon-button icon-button--border" onClick={onClose} aria-label="Fechar"><Icon name="x" /></button></header>
+      <section className="modal modal--rule" role="dialog" aria-modal="true" aria-labelledby="rule-title">
+        <header><div><span className="eyebrow">{isEditing ? 'editar automação' : 'nova automação'}</span><h2 id="rule-title">{isEditing ? 'Ajustar regra' : 'Criar uma regra'}</h2></div><button type="button" className="icon-button icon-button--border" onClick={onClose} aria-label="Fechar"><Icon name="x" /></button></header>
         <form onSubmit={submit}>
           <div className="modal__body form-stack">
-            <label className="field"><span>Nome da regra</span><input autoFocus value={draft.name} onChange={(event) => change('name', event.target.value)} placeholder="Ex.: Grupos somem em 2 horas" required /></label>
-            <div className="form-grid">
+            <label className="field"><span>Nome da regra <em className="label-note">é apenas um rótulo</em></span><input autoFocus value={draft.name} onChange={(event) => change('name', event.target.value)} placeholder="Ex.: Temporárias do grupo da turma" required /><small>O nome ajuda você a reconhecer a regra; ele não seleciona nenhum grupo.</small></label>
+
+            <fieldset className="scope-picker">
+              <legend>Onde aplicar</legend>
+              <div>{scopeOptions.map((option) => <label key={option.value} className={`scope-option ${draft.chatKind === option.value ? 'active' : ''} ${option.risky ? 'scope-option--risky' : ''}`}><input type="radio" name="chatKind" value={option.value} checked={draft.chatKind === option.value} onChange={() => { setDraft((current) => ({ ...current, chatKind: option.value, chatJid: option.value === 'exact' ? current.chatJid : null })); setError(''); }} /><span><strong>{option.label}</strong><small>{option.hint}</small></span></label>)}</div>
+            </fieldset>
+
+            {draft.chatKind === 'exact' && <div className="group-selector">
+              <div className="group-selector__toolbar"><strong>Destino da regra</strong><button type="button" className="button button--small button--ghost" onClick={retryGroups} disabled={groupsLoading}>{groupsLoading ? <Spinner /> : <Icon name="refresh" />}Atualizar grupos</button></div>
+              <label className="field"><span>Grupo específico</span><select value={draft.chatJid ?? ''} onChange={(event) => change('chatJid', event.target.value)} disabled={groupsLoading} required><option value="">{groupsLoading ? 'Carregando seus grupos…' : 'Selecione um grupo'}</option>{draft.chatJid && !selectedGroupKnown && <option value={draft.chatJid}>{displayJid(draft.chatJid)} (seleção atual)</option>}{groups.map((group) => <option key={group.jid} value={group.jid}>{groupOptionLabel(group)}</option>)}</select><small>O identificador curto diferencia grupos que possuem o mesmo nome.</small></label>
+              {groupsLoading && <div className="group-state"><Spinner /><span>Buscando grupos conectados…</span></div>}
+              {!groupsLoading && groupsError && <div className="group-state group-state--error"><Icon name="warning" /><span>{groupsError}</span><button type="button" className="text-button" onClick={retryGroups}>Tentar novamente</button></div>}
+              {!groupsLoading && !groupsError && groups.length === 0 && <div className="group-state"><Icon name="info" /><span>Nenhum grupo foi retornado. Você pode atualizar a conexão ou informar o JID abaixo.</span></div>}
+              <details className="manual-jid"><summary>Informar identificador (JID) manualmente</summary><label className="field"><span>JID completo</span><input value={draft.chatJid ?? ''} onChange={(event) => change('chatJid', event.target.value)} placeholder="identificador@g.us" /><small>Opção avançada para grupos que ainda não aparecem na lista.</small></label></details>
+            </div>}
+
+            <div className="form-grid form-grid--compact">
+              <label className="field"><span>Tipo de mensagem</span><select value={draft.messageType} onChange={(event) => change('messageType', event.target.value as MessageType)}><option value="all">Qualquer tipo</option><option value="text">Texto</option><option value="image">Imagem</option><option value="video">Vídeo</option><option value="audio">Áudio</option><option value="document">Documento</option><option value="sticker">Figurinha</option><option value="other">Outro</option></select></label>
+              <label className="field"><span>Filtro de conteúdo</span><select value={draft.contentFilter} onChange={(event) => { const contentFilter = event.target.value as ContentFilter; setDraft((current) => ({ ...current, contentFilter, contentPattern: contentFilter === 'any' ? null : current.contentPattern, caseSensitive: contentFilter === 'any' ? false : current.caseSensitive })); setError(''); }}><option value="any">Qualquer conteúdo</option><option value="startsWith">Começa com…</option><option value="notStartsWith">Exceto quando começa com…</option><option value="regex">Expressão regular (regex)</option></select></label>
+            </div>
+
+            {draft.contentFilter !== 'any' && <div className="content-filter-box">
+              <label className="field"><span>{draft.contentFilter === 'regex' ? 'Expressão regular' : 'Texto inicial'}</span><input value={draft.contentPattern ?? ''} onChange={(event) => change('contentPattern', event.target.value)} placeholder={draft.contentFilter === 'regex' ? '^(rascunho|teste)\\b' : 'Ex.: temporário:'} required /><small>{contentFilterHelp(draft.contentFilter)}</small></label>
+              <label className={`toggle-card toggle-card--compact ${draft.caseSensitive ? 'active' : ''}`}><input type="checkbox" checked={draft.caseSensitive} onChange={(event) => change('caseSensitive', event.target.checked)} /><span className="switch" aria-hidden="true"><i /></span><span><strong>Diferenciar maiúsculas</strong><small>{draft.caseSensitive ? '“Teste” e “teste” são diferentes' : 'Maiúsculas e minúsculas são equivalentes'}</small></span></label>
+            </div>}
+
+            <div className="form-grid form-grid--compact">
               <label className="field"><span>Prioridade</span><input type="number" min="-10000" max="10000" step="1" value={draft.priority} onChange={(event) => change('priority', Number(event.target.value))} required /><small>Maior número tem precedência.</small></label>
               <label className="field"><span>Ação</span><select value={draft.action} onChange={(event) => { const action = event.target.value as RuleAction; setDraft((current) => ({ ...current, action, delaySeconds: action === 'delete' ? current.delaySeconds ?? 86400 : null })); }}><option value="delete">Apagar para todos</option><option value="keep">Manter mensagem</option></select></label>
-              <label className="field"><span>Tipo de conversa</span><select value={draft.chatKind} onChange={(event) => change('chatKind', event.target.value as ChatKind)}><option value="all">Todas as conversas</option><option value="direct">Conversas individuais</option><option value="group">Grupos</option><option value="exact">Conversa específica</option></select></label>
-              <label className="field"><span>Tipo de mensagem</span><select value={draft.messageType} onChange={(event) => change('messageType', event.target.value as MessageType)}><option value="all">Qualquer tipo</option><option value="text">Texto</option><option value="image">Imagem</option><option value="video">Vídeo</option><option value="audio">Áudio</option><option value="document">Documento</option><option value="sticker">Figurinha</option><option value="other">Outro</option></select></label>
             </div>
-            {draft.chatKind === 'exact' && <label className="field"><span>JID da conversa</span><input value={draft.chatJid ?? ''} onChange={(event) => change('chatJid', event.target.value)} placeholder="5511999999999@s.whatsapp.net" required /><small>Use o identificador completo recebido pela Evolution API.</small></label>}
             {draft.action === 'delete' && <label className="field"><span>Apagar depois de (segundos)</span><input type="number" min="10" max="169200" step="1" value={draft.delaySeconds ?? 86400} onChange={(event) => change('delaySeconds', Number(event.target.value))} required /><small>Resultado: {formatDuration(draft.delaySeconds ?? 0)} · máximo 47h</small></label>}
-            <div className={`rule-preview rule-preview--${draft.action}`}><Icon name={draft.action === 'delete' ? 'clock' : 'shield'} /><p><span>Esta regra vai</span><strong>{draft.action === 'delete' ? `agendar a exclusão após ${formatDuration(draft.delaySeconds ?? 0)}` : 'impedir a exclusão das mensagens correspondentes'}</strong></p></div>
+
+            <label className={`toggle-card rule-enabled-toggle ${draft.enabled ? 'active' : ''}`}><input type="checkbox" checked={draft.enabled ?? true} onChange={(event) => change('enabled', event.target.checked)} /><span className="switch" aria-hidden="true"><i /></span><span><strong>Regra ativa</strong><small>{draft.enabled ? 'Novas mensagens correspondentes serão processadas' : 'A regra ficará salva, mas pausada'}</small></span></label>
+            <div className={`rule-preview rule-preview--${draft.action}`}><Icon name={draft.action === 'delete' ? 'clock' : 'shield'} /><p><span>Resumo</span><strong>{draft.enabled === false ? 'Regra pausada — nenhuma mensagem será afetada' : draft.action === 'delete' ? `Só mensagens correspondentes serão apagadas após ${formatDuration(draft.delaySeconds ?? 0)}` : 'Mensagens correspondentes ficarão protegidas'}</strong></p></div>
             {error && <div className="form-error" role="alert"><Icon name="warning" />{error}</div>}
           </div>
           <footer><button type="button" className="button button--ghost" onClick={onClose}>Cancelar</button><button className="button button--primary" disabled={saving}>{saving ? <Spinner /> : <><Icon name="check" />{isEditing ? 'Salvar alterações' : 'Criar regra'}</>}</button></footer>
@@ -816,7 +941,7 @@ function Queue({ notify }: { notify: (kind: Toast['kind'], text: string) => void
 
 function JobRow({ job, busy, action }: { job: Job; busy: boolean; action: (action: 'retry' | 'cancel') => void }) {
   const meta = statusMeta(job.status);
-  return <tr><td data-label="Destino"><div className="job-destination"><span>{messageTypeGlyph(job.messageType)}</span><p><strong>{displayJid(job.remoteJid)}</strong><small>{messageTypeLabel(job.messageType)} · #{job.id.slice(0, 8)}{job.simulateOnly ? ' · simulação protegida' : ''}</small>{job.lastError && <details><summary>Ver erro</summary><p>{job.lastError}</p></details>}</p></div></td><td data-label="Envio"><time dateTime={job.sentAt}>{formatDate(job.sentAt)}</time></td><td data-label="Exclusão"><time dateTime={job.deleteAt}>{formatDate(job.deleteAt)}</time><small className="table-relative">{['pending', 'retry'].includes(job.status) && formatRelative(job.deleteAt)}</small></td><td data-label="Tentativas"><span className="attempt-count">{job.attemptCount}</span></td><td data-label="Status"><span className={`status-chip status-chip--${meta.tone}`}><i />{meta.label}</span></td><td className="job-actions"><div>{['failed', 'cancelled'].includes(job.status) && <button className="icon-button icon-button--border" onClick={() => action('retry')} disabled={busy} aria-label={`Tentar job ${job.id} novamente`}>{busy ? <Spinner /> : <Icon name="refresh" />}</button>}{['pending', 'retry'].includes(job.status) && <button className="icon-button icon-button--danger" onClick={() => action('cancel')} disabled={busy} aria-label={`Cancelar job ${job.id}`}>{busy ? <Spinner /> : <Icon name="x" />}</button>}</div></td></tr>;
+  return <tr><td data-label="Destino"><div className="job-destination"><span>{messageTypeGlyph(job.messageType)}</span><p><strong>{displayJid(job.remoteJid)}</strong><small>{messageTypeLabel(job.messageType)} · #{job.id.slice(0, 8)}{job.simulateOnly ? ' · simulação protegida' : ''}</small>{job.ruleSnapshot?.ruleName && <small className="job-rule">Regra: {job.ruleSnapshot.ruleName}</small>}{job.lastError && <details><summary>Ver erro</summary><p>{job.lastError}</p></details>}</p></div></td><td data-label="Envio"><time dateTime={job.sentAt}>{formatDate(job.sentAt)}</time></td><td data-label="Exclusão"><time dateTime={job.deleteAt}>{formatDate(job.deleteAt)}</time><small className="table-relative">{['pending', 'retry'].includes(job.status) && formatRelative(job.deleteAt)}</small></td><td data-label="Tentativas"><span className="attempt-count">{job.attemptCount}</span></td><td data-label="Status"><span className={`status-chip status-chip--${meta.tone}`}><i />{meta.label}</span></td><td className="job-actions"><div>{['failed', 'cancelled'].includes(job.status) && <button className="icon-button icon-button--border" onClick={() => action('retry')} disabled={busy} aria-label={`Tentar job ${job.id} novamente`}>{busy ? <Spinner /> : <Icon name="refresh" />}</button>}{['pending', 'retry'].includes(job.status) && <button className="icon-button icon-button--danger" onClick={() => action('cancel')} disabled={busy} aria-label={`Cancelar job ${job.id}`}>{busy ? <Spinner /> : <Icon name="x" />}</button>}</div></td></tr>;
 }
 
 const logFilters: Array<{ value: '' | LogLevel; label: string }> = [
@@ -971,8 +1096,39 @@ function displayJid(jid: string): string {
   return raw;
 }
 
-function chatKindLabel(kind: ChatKind, jid?: string | null): string {
-  return ({ all: 'todas as conversas', direct: 'conversas individuais', group: 'grupos', exact: jid ? displayJid(jid) : 'uma conversa específica' })[kind];
+function chatKindLabel(kind: ChatKind, jid?: string | null, groupName?: string): string {
+  return ({ all: 'todas as conversas', direct: 'conversas individuais', group: 'todos os grupos', exact: groupName || (jid ? displayJid(jid) : 'um grupo específico') })[kind];
+}
+
+function shortGroupId(jid: string): string {
+  const raw = jid.split('@')[0] ?? '';
+  return `…${raw.slice(-8)}`;
+}
+
+function groupOptionLabel(group: EvolutionGroup): string {
+  const count = typeof group.participantCount === 'number' ? ` · ${group.participantCount} participantes` : '';
+  return `${group.name}${count} · id ${shortGroupId(group.jid)}`;
+}
+
+function groupNameForJid(groups: EvolutionGroup[], jid?: string | null): string | undefined {
+  const group = groups.find((candidate) => candidate.jid === jid);
+  return group ? `${group.name} (id ${shortGroupId(group.jid)})` : undefined;
+}
+
+function contentFilterLabel(filter: ContentFilter, pattern?: string | null, caseSensitive = false): string {
+  const quoted = `“${pattern || '…'}”`;
+  const sensitivity = caseSensitive ? ' (diferenciando maiúsculas)' : '';
+  if (filter === 'startsWith') return `começa com ${quoted}${sensitivity}`;
+  if (filter === 'notStartsWith') return `não começa com ${quoted}${sensitivity}`;
+  if (filter === 'regex') return `corresponde ao regex ${quoted}${sensitivity}`;
+  return 'pode ser qualquer conteúdo';
+}
+
+function contentFilterHelp(filter: ContentFilter): string {
+  if (filter === 'startsWith') return 'A regra só combina quando o texto ou a legenda começa exatamente assim.';
+  if (filter === 'notStartsWith') return 'A regra combina com o restante e ignora mensagens que começam assim.';
+  if (filter === 'regex') return 'Use sintaxe RE2 sem barras externas. Lookaround e backreferences não são aceitos. Exemplo: ^(rascunho|teste)\\b';
+  return '';
 }
 
 function messageTypeLabel(type: string): string {

@@ -9,7 +9,12 @@ const MESSAGE_WRAPPERS = new Set([
   'viewOnceMessage',
   'viewOnceMessageV2',
   'viewOnceMessageV2Extension',
+  'documentWithCaptionMessage',
 ]);
+
+// Limita o trabalho do motor (especialmente regex) e garante que o conteudo
+// continue sendo apenas um dado transitorio do webhook.
+export const MAX_FILTERABLE_CONTENT_LENGTH = 10_000;
 
 function messageContent(value: unknown) {
   let current = isRecord(value) ? value : null;
@@ -32,6 +37,44 @@ function messageType(value: unknown): MessageType {
   if (normalized.includes('document')) return 'document';
   if (normalized.includes('sticker')) return 'sticker';
   return 'other';
+}
+
+function boundedText(value: unknown): string | null | undefined {
+  if (typeof value !== 'string') return null;
+  // Nunca avalie um trecho como se fosse a mensagem inteira: isso poderia
+  // transformar `$` ou uma excecao por prefixo em falso positivo destrutivo.
+  return value.length <= MAX_FILTERABLE_CONTENT_LENGTH ? value : undefined;
+}
+
+function textFromPayload(value: unknown, keys: string[]) {
+  if (!isRecord(value)) return null;
+  for (const key of keys) {
+    const result = boundedText(value[key]);
+    if (result !== null) return result;
+  }
+  return null;
+}
+
+/** Extrai apenas o texto/caption necessario para a decisao; o chamador nao o persiste. */
+function textContent(content: JsonRecord | null): string | null | undefined {
+  if (!content) return null;
+  const conversation = boundedText(content.conversation);
+  if (conversation !== null) return conversation;
+
+  const candidates: Array<[string, string[]]> = [
+    ['extendedTextMessage', ['text']],
+    ['imageMessage', ['caption']],
+    ['videoMessage', ['caption']],
+    ['documentMessage', ['caption']],
+    ['buttonsResponseMessage', ['selectedDisplayText']],
+    ['templateButtonReplyMessage', ['selectedDisplayText']],
+    ['listResponseMessage', ['title', 'description']],
+  ];
+  for (const [type, keys] of candidates) {
+    const result = textFromPayload(content[type], keys);
+    if (result !== null) return result;
+  }
+  return null;
 }
 
 function timestamp(value: unknown, fallback: Date) {
@@ -57,7 +100,10 @@ function parseOne(data: unknown, instance: string, fallback: Date): ParsedMessag
     return null;
   }
   const participant = typeof keyCandidate.participant === 'string' ? keyCandidate.participant : null;
-  const nested = messageContent(data.message);
+  const envelope = isRecord(data.message) && isRecord(data.message.key) && isRecord(data.message.message)
+    ? data.message.message
+    : data.message;
+  const nested = messageContent(envelope);
   const declaredType = typeof data.messageType === 'string' ? data.messageType : undefined;
   const rawType = declaredType && !MESSAGE_WRAPPERS.has(declaredType) ? declaredType : nested.rawType;
   const type = messageType(rawType);
@@ -69,6 +115,7 @@ function parseOne(data: unknown, instance: string, fallback: Date): ParsedMessag
     messageId: id,
     fromMe: true,
     messageType: type,
+    textContent: textContent(nested.content),
     sentAt: timestamp(data.messageTimestamp, fallback),
   };
 }

@@ -11,6 +11,7 @@ export const MESSAGE_TYPES = [
 export type MessageType = (typeof MESSAGE_TYPES)[number];
 export type ChatKind = 'all' | 'direct' | 'group' | 'exact';
 export type RuleAction = 'delete' | 'keep';
+export type ContentFilter = 'any' | 'startsWith' | 'notStartsWith' | 'regex';
 export type JobStatus =
   | 'pending'
   | 'processing'
@@ -42,6 +43,9 @@ export interface Rule {
   chatKind: ChatKind;
   chatJid: string | null;
   messageType: MessageType | 'all';
+  contentFilter: ContentFilter;
+  contentPattern: string | null;
+  caseSensitive: boolean;
   action: RuleAction;
   delaySeconds: number | null;
   enabled: boolean;
@@ -56,6 +60,13 @@ export interface ParsedMessage {
   messageId: string;
   fromMe: true;
   messageType: MessageType;
+  /**
+   * Conteudo usado somente durante a decisao do webhook. `undefined` significa
+   * que o conteudo nao esta disponivel (por exemplo, ao revalidar um job); `null`
+   * significa que a mensagem foi analisada, mas nao possui texto/caption.
+   * Este campo nunca e persistido em deletion_jobs ou nos logs.
+   */
+  textContent?: string | null;
   sentAt: Date;
 }
 
@@ -64,6 +75,8 @@ export interface RuleDecision {
   delaySeconds: number | null;
   ruleId: string | null;
   ruleName: string;
+  /** Identifica a revisao que avaliou o conteudo sem persistir o conteudo. */
+  ruleUpdatedAt: string | null;
 }
 
 export interface ClaimedJob {
@@ -79,4 +92,6 @@ export interface ClaimedJob {
   maxAttempts: number;
   isTest: boolean;
   simulateOnly: boolean;
+  ruleId: string | null;
+  ruleUpdatedAt: string | null;
 }

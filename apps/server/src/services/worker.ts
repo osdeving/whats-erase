@@ -5,7 +5,7 @@ import type { JobsStore } from './jobs-store.js';
 import type { RulesStore } from './rules-store.js';
 import type { SettingsStore } from './settings-store.js';
 import { EvolutionClient, EvolutionError, summarizeDeleteAcknowledgement } from './evolution-client.js';
-import { decideRule } from './rule-engine.js';
+import { decideRule, ruleMatches } from './rule-engine.js';
 import type { ClaimedJob, ParsedMessage } from '../types.js';
 
 const MAX_DELETE_AGE_MS = 48 * 60 * 60 * 1000;
@@ -128,11 +128,41 @@ export class DeletionWorker {
       sentAt: job.sentAt,
     };
     const currentDecision = decideRule(ruleMessage, activeRules, 1);
-    if (currentDecision.action === 'keep') {
+    // O fallback agora e KEEP, mas ele nao e uma regra protetiva explicita. Um
+    // job textual valido nao possui o conteudo nesta fase (por privacidade),
+    // entao so uma regra KEEP realmente identificada pode cancela-lo aqui.
+    if (currentDecision.action === 'keep' && currentDecision.ruleId !== null) {
       await this.jobs.markCancelledByRule(job.id, currentDecision.ruleName);
       await this.record('warn', 'job.cancelled', 'Job cancelado por uma regra de protecao ativa.', {
         jobId: job.id,
         ruleId: currentDecision.ruleId,
+        attemptCount: job.attemptCount,
+      });
+      return;
+    }
+
+    // Jobs antigos criados pelo antigo fallback global nao ganham permissao de
+    // exclusao depois da migracao opt-in. Todo delete real precisa ter vindo de
+    // uma regra explicita que ainda exista e continue sendo uma regra DELETE.
+    const scheduledRule = job.ruleId ? activeRules.find((rule) => rule.id === job.ruleId) : null;
+    if (!scheduledRule || !scheduledRule.enabled || scheduledRule.action !== 'delete') {
+      await this.jobs.markCancelledByRule(job.id, 'nenhuma regra de exclusao explicita ativa');
+      await this.record('warn', 'job.cancelled', 'Job cancelado porque a regra de exclusao original nao esta ativa.', {
+        jobId: job.id,
+        ruleId: job.ruleId,
+        attemptCount: job.attemptCount,
+      });
+      return;
+    }
+
+    const sameRevision = job.ruleUpdatedAt !== null && scheduledRule.updatedAt.toISOString() === job.ruleUpdatedAt;
+    // Snapshots anteriores a esta feature nao possuem revisao. Eles so podem
+    // prosseguir se a regra atual puder ser verificada sem o texto original.
+    if (!sameRevision && (job.ruleUpdatedAt !== null || !ruleMatches(scheduledRule, ruleMessage))) {
+      await this.jobs.markCancelledByRule(job.id, 'regra de exclusao alterada apos o agendamento');
+      await this.record('warn', 'job.cancelled', 'Job cancelado porque a regra original mudou.', {
+        jobId: job.id,
+        ruleId: job.ruleId,
         attemptCount: job.attemptCount,
       });
       return;

@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   EvolutionClient,
   extractConnectionState,
+  extractGroups,
   extractQrCode,
   summarizeDeleteAcknowledgement,
   TRACKED_WEBHOOK_EVENTS,
@@ -60,6 +61,17 @@ describe('EvolutionClient', () => {
     });
   });
 
+  it('busca grupos sem solicitar participantes', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('[]', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await new EvolutionClient(connection).fetchGroups();
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('http://evolution:8080/group/fetchAllGroups/personal?getParticipants=false');
+    expect(init.headers).toMatchObject({ apikey: 'super-secret' });
+  });
+
   it('nao aceita uma base URL capaz de vazar a API key', () => {
     for (const baseUrl of [
       'ftp://evolution.local',
@@ -91,6 +103,33 @@ describe('EvolutionClient', () => {
         permanent: false,
         pausesDaemon: true,
       }),
+    );
+  });
+});
+
+describe('extractGroups', () => {
+  it('expoe somente identificador, nome e quantidade e ignora itens que nao sao grupos', () => {
+    expect(
+      extractGroups([
+        {
+          id: '1203632@g.us',
+          subject: 'Equipe B',
+          size: 8,
+          participants: [{ id: '5511999@s.whatsapp.net', admin: 'admin' }],
+          owner: '5511888@s.whatsapp.net',
+        },
+        { id: '5511777@s.whatsapp.net', subject: 'Contato' },
+        { jid: '1203631@g.us', name: 'Equipe A', participantCount: 4 },
+      ]),
+    ).toEqual([
+      { jid: '1203631@g.us', name: 'Equipe A', participantCount: 4 },
+      { jid: '1203632@g.us', name: 'Equipe B', participantCount: 8 },
+    ]);
+  });
+
+  it('recusa uma resposta sem uma lista em vez de simular que nao ha grupos', () => {
+    expect(() => extractGroups({ status: 'open' })).toThrowError(
+      expect.objectContaining({ code: 'EVOLUTION_INVALID_GROUPS_RESPONSE', status: 502 }),
     );
   });
 });

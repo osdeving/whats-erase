@@ -20,12 +20,13 @@ import {
   EvolutionClient,
   EvolutionError,
   extractConnectionState,
+  extractGroups,
   extractQrCode,
 } from './services/evolution-client.js';
 import { AuditLogStore, type AuditLogLevel } from './services/audit-log-store.js';
 import { JobsStore } from './services/jobs-store.js';
 import { parseEvolutionDeletedKeys, parseEvolutionMessages } from './services/message-parser.js';
-import { decideRule } from './services/rule-engine.js';
+import { decideRule, isSafeContentRegex, MAX_CONTENT_PATTERN_LENGTH } from './services/rule-engine.js';
 import { RulesStore, type RuleInput } from './services/rules-store.js';
 import { SettingsStore } from './services/settings-store.js';
 import { DeletionWorker } from './services/worker.js';
@@ -65,6 +66,9 @@ const ruleSchema = z
     chatKind: z.enum(['all', 'direct', 'group', 'exact']),
     chatJid: z.string().trim().max(200).nullable().optional(),
     messageType: z.enum(['all', 'text', 'image', 'video', 'audio', 'document', 'sticker', 'other']),
+    contentFilter: z.enum(['any', 'startsWith', 'notStartsWith', 'regex']).default('any'),
+    contentPattern: z.string().max(MAX_CONTENT_PATTERN_LENGTH).nullable().optional(),
+    caseSensitive: z.boolean().default(false),
     action: z.enum(['delete', 'keep']),
     delaySeconds: z.number().int().min(10).max(MAX_DELAY_SECONDS).nullable().optional(),
     enabled: z.boolean().default(true),
@@ -76,6 +80,23 @@ const ruleSchema = z
     }
     if (rule.action === 'delete' && rule.delaySeconds == null) {
       context.addIssue({ code: 'custom', path: ['delaySeconds'], message: 'Informe o atraso da exclusao.' });
+    }
+    if (rule.contentFilter === 'any' && rule.contentPattern != null) {
+      context.addIssue({ code: 'custom', path: ['contentPattern'], message: 'O filtro qualquer conteudo nao usa um padrao.' });
+    }
+    if (rule.contentFilter !== 'any' && !rule.contentPattern) {
+      context.addIssue({ code: 'custom', path: ['contentPattern'], message: 'Informe o texto ou expressao do filtro.' });
+    }
+    if (
+      rule.contentFilter === 'regex' &&
+      rule.contentPattern &&
+      !isSafeContentRegex(rule.contentPattern, rule.caseSensitive)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['contentPattern'],
+        message: 'A expressao regular e invalida ou pode consumir recursos demais.',
+      });
     }
   });
 
@@ -219,11 +240,14 @@ export async function buildApp(env: Env) {
     }
   });
 
-  app.addHook('onSend', async (_request, reply, payload) => {
+  app.addHook('onSend', async (request, reply, payload) => {
     reply.header('x-content-type-options', 'nosniff');
     reply.header('x-frame-options', 'DENY');
     reply.header('referrer-policy', 'no-referrer');
     reply.header('permissions-policy', 'camera=(), microphone=(), geolocation=()');
+    if ((request.url.split('?')[0] ?? request.url).startsWith('/api/')) {
+      reply.header('cache-control', 'no-store');
+    }
     reply.header(
       'content-security-policy',
       "default-src 'self'; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
@@ -404,6 +428,12 @@ export async function buildApp(env: Env) {
     return ensureInstanceQr(client, current.webhookUrl, await settings.getWebhookSecret());
   });
 
+  app.get('/api/evolution/groups', async () => {
+    const connection = await settings.getEvolutionConnection();
+    const client = new EvolutionClient(connection);
+    return extractGroups(await client.fetchGroups());
+  });
+
   app.get('/api/status', async () => {
     const current = await settings.get();
     const counts = await jobs.counts();
@@ -484,6 +514,8 @@ export async function buildApp(env: Env) {
       action: created.action,
       chatKind: created.chatKind,
       messageType: created.messageType,
+      contentFilter: created.contentFilter,
+      caseSensitive: created.caseSensitive,
       delaySeconds: created.delaySeconds,
     });
     return reply.code(201).send(created);
@@ -499,6 +531,8 @@ export async function buildApp(env: Env) {
         action: updated.action,
         chatKind: updated.chatKind,
         messageType: updated.messageType,
+        contentFilter: updated.contentFilter,
+        caseSensitive: updated.caseSensitive,
         delaySeconds: updated.delaySeconds,
       });
     }

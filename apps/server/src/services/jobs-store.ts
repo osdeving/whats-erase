@@ -27,6 +27,17 @@ interface JobRow {
   updated_at: Date;
 }
 
+function scheduledRule(snapshot: unknown) {
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+    return { ruleId: null, ruleUpdatedAt: null };
+  }
+  const value = snapshot as Record<string, unknown>;
+  return {
+    ruleId: typeof value.ruleId === 'string' ? value.ruleId : null,
+    ruleUpdatedAt: typeof value.ruleUpdatedAt === 'string' ? value.ruleUpdatedAt : null,
+  };
+}
+
 function publicJob(row: JobRow) {
   return {
     id: row.id,
@@ -192,6 +203,7 @@ export class JobsStore {
       max_attempts: number;
       is_test: boolean;
       simulate_only: boolean;
+      rule_snapshot: unknown;
     }>(
       `WITH picked AS (
         SELECT j.id
@@ -210,23 +222,28 @@ export class JobsStore {
       FROM picked
       WHERE j.id = picked.id
       RETURNING j.id, j.instance_name, j.remote_jid, j.participant, j.message_id, j.message_type,
-                j.sent_at, j.delete_at, j.attempt_count, j.max_attempts, j.is_test, j.simulate_only`,
+                j.sent_at, j.delete_at, j.attempt_count, j.max_attempts, j.is_test, j.simulate_only,
+                j.rule_snapshot`,
       [limit],
     );
-    return result.rows.map((row) => ({
-      id: row.id,
-      instanceName: row.instance_name,
-      remoteJid: row.remote_jid,
-      participant: row.participant,
-      messageId: row.message_id,
-      messageType: row.message_type as ClaimedJob['messageType'],
-      sentAt: row.sent_at,
-      deleteAt: row.delete_at,
-      attemptCount: row.attempt_count,
-      maxAttempts: row.max_attempts,
-      isTest: row.is_test,
-      simulateOnly: row.simulate_only,
-    }));
+    return result.rows.map((row) => {
+      const snapshot = scheduledRule(row.rule_snapshot);
+      return {
+        id: row.id,
+        instanceName: row.instance_name,
+        remoteJid: row.remote_jid,
+        participant: row.participant,
+        messageId: row.message_id,
+        messageType: row.message_type as ClaimedJob['messageType'],
+        sentAt: row.sent_at,
+        deleteAt: row.delete_at,
+        attemptCount: row.attempt_count,
+        maxAttempts: row.max_attempts,
+        isTest: row.is_test,
+        simulateOnly: row.simulate_only,
+        ...snapshot,
+      };
+    });
   }
 
   async markSucceeded(id: string, simulated: boolean) {

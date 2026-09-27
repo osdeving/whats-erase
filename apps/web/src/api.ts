@@ -17,6 +17,12 @@ function messageFromBody(body: unknown, fallback: string): string {
     for (const key of ['message', 'error', 'detail']) {
       if (typeof candidate[key] === 'string' && candidate[key]) return candidate[key];
     }
+    const issues = candidate.issues;
+    if (Array.isArray(issues)) {
+      const first = issues.find((issue) => issue && typeof issue === 'object' && typeof (issue as Record<string, unknown>).message === 'string');
+      const issueMessage = first && (first as Record<string, unknown>).message;
+      if (typeof issueMessage === 'string' && issueMessage) return issueMessage;
+    }
   }
   return fallback;
 }
@@ -31,6 +37,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
       ...init,
       headers,
       credentials: 'same-origin',
+      cache: 'no-store',
     });
   } catch {
     throw new ApiError('Não foi possível alcançar o servidor.', 0);
@@ -65,7 +72,7 @@ export function qrFromPayload(payload: QrPayload): { image: string | null; meta:
 export async function fetchQr(): Promise<{ image: string | null; meta: QrPayload }> {
   let response: Response;
   try {
-    response = await fetch('/api/evolution/qr', { credentials: 'same-origin' });
+    response = await fetch('/api/evolution/qr', { credentials: 'same-origin', cache: 'no-store' });
   } catch {
     throw new ApiError('Não foi possível buscar o QR Code.', 0);
   }

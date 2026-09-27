@@ -30,6 +30,13 @@ export interface RuntimeStatus {
 export type ChatKind = 'all' | 'direct' | 'group' | 'exact';
 export type MessageType = 'all' | 'text' | 'image' | 'video' | 'audio' | 'document' | 'sticker' | 'other';
 export type RuleAction = 'delete' | 'keep';
+export type ContentFilter = 'any' | 'startsWith' | 'notStartsWith' | 'regex';
+
+export interface EvolutionGroup {
+  jid: string;
+  name: string;
+  participantCount?: number | null;
+}
 
 export interface Rule {
   id: string;
@@ -38,6 +45,9 @@ export interface Rule {
   chatKind: ChatKind;
   chatJid?: string | null;
   messageType: MessageType;
+  contentFilter: ContentFilter;
+  contentPattern?: string | null;
+  caseSensitive: boolean;
   action: RuleAction;
   delaySeconds: number | null;
   enabled?: boolean;
@@ -55,6 +65,12 @@ export interface Job {
   attemptCount: number;
   simulateOnly?: boolean;
   lastError?: string | null;
+  ruleSnapshot?: {
+    ruleId?: string | null;
+    ruleName?: string;
+    action?: RuleAction;
+    delaySeconds?: number | null;
+  } | null;
 }
 
 export type LogLevel = 'info' | 'warn' | 'error';

@@ -21,6 +21,7 @@ describe('parseEvolutionMessages', () => {
           remoteJid: '5511999999999@s.whatsapp.net',
           messageId: 'ABC123',
           messageType: 'text',
+          textContent: 'conteudo que nao deve ser persistido',
           fromMe: true,
         }),
       ]);
@@ -70,8 +71,43 @@ describe('parseEvolutionMessages', () => {
     });
 
     expect(messages).toEqual([
-      expect.objectContaining({ messageType: 'image', participant: '5511@s.whatsapp.net' }),
+      expect.objectContaining({
+        messageType: 'image',
+        participant: '5511@s.whatsapp.net',
+        textContent: 'foto',
+      }),
     ]);
+  });
+
+  it('extrai texto estendido e captions sem carregar metadados da midia', () => {
+    const payload = (id: string, message: Record<string, unknown>) => ({
+      event: 'messages.upsert',
+      instance: 'personal',
+      data: { key: { id, remoteJid: '120363@g.us', fromMe: true }, message },
+    });
+
+    expect(
+      parseEvolutionMessages(payload('TEXT', { extendedTextMessage: { text: 'lembrete', matchedText: 'privado' } }))[0]
+        ?.textContent,
+    ).toBe('lembrete');
+    expect(
+      parseEvolutionMessages(payload('DOC', { documentMessage: { caption: 'apagar: contrato', fileName: 'secreto.pdf' } }))[0]
+        ?.textContent,
+    ).toBe('apagar: contrato');
+    expect(parseEvolutionMessages(payload('AUDIO', { audioMessage: { seconds: 3 } }))[0]?.textContent).toBeNull();
+  });
+
+  it('marca texto acima do limite como indisponivel em vez de avaliar um trecho', () => {
+    const [message] = parseEvolutionMessages({
+      event: 'messages.upsert',
+      instance: 'personal',
+      data: {
+        key: { id: 'LONG', remoteJid: '120363@g.us', fromMe: true },
+        message: { conversation: `${'a'.repeat(10_000)}FIM` },
+      },
+    });
+
+    expect(message).toHaveProperty('textContent', undefined);
   });
 
   it('usa um horario seguro quando o timestamp e invalido', () => {

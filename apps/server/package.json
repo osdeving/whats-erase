@@ -16,6 +16,7 @@
     "@fastify/static": "^10.1.5",
     "fastify": "^5.6.1",
     "pg": "^8.16.3",
+    "re2js": "^2.8.6",
     "zod": "^4.1.11"
   },
   "devDependencies": {

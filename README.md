@@ -17,9 +17,10 @@ O WhatsErase observa somente mensagens novas enviadas pela própria conta (`from
 ## Recursos
 
 - conexão guiada por QR Code com uma instância `WHATSAPP-BAILEYS`;
-- regras por todas as conversas, conversa direta, grupo ou JID exato;
-- filtros por texto, imagem, vídeo, áudio, documento, figurinha e outros;
+- regras por todas as conversas, conversa direta, todos os grupos ou um grupo específico escolhido pelo nome;
+- filtros por tipo de mensagem e por conteúdo: começa com, não começa com ou expressão regular;
 - ação **apagar depois de X** ou **nunca apagar**;
+- comportamento seguro por padrão: sem regra correspondente, a mensagem é mantida;
 - regra protetiva “nunca apagar” com precedência sobre regras de exclusão;
 - fila durável em PostgreSQL com deduplicação, lease, retry e backoff;
 - modo simulação gravado no próprio job, evitando exclusões acidentais posteriores;
@@ -51,7 +52,7 @@ As capturas abaixo usam dados de demonstração. Nenhum contato, QR Code ou cred
 1. A Evolution recebe uma mensagem enviada pela conta conectada.
 2. O webhook autenticado entrega o evento ao WhatsErase.
 3. O backend aceita apenas a instância configurada, mensagens próprias e eventos posteriores ao início do daemon.
-4. O motor escolhe a regra aplicável; qualquer regra `keep` correspondente vence uma exclusão.
+4. O motor escolhe a regra aplicável; qualquer regra `keep` correspondente vence uma exclusão e, sem correspondência, nada é apagado.
 5. Um job é persistido no PostgreSQL com o horário de execução e um snapshot da decisão.
 6. O worker reivindica jobs vencidos com `FOR UPDATE SKIP LOCKED` e solicita a revogação à Evolution.
 7. Resultado, retries e eventos correlatos aparecem na fila e nos logs sanitizados.
@@ -94,7 +95,7 @@ Abra [http://localhost:3210](http://localhost:3210) e siga o primeiro acesso:
 1. crie a senha local do painel;
 2. em **Conexão**, mantenha os valores entregues pelo Compose e clique em **Testar conexão**;
 3. crie a instância `whats-erase`, carregue o QR e leia-o em **WhatsApp → Aparelhos conectados**;
-4. configure o atraso e as regras;
+4. crie uma regra, escolha explicitamente o grupo e, se quiser, filtre o começo do texto ou use uma expressão regular;
 5. mantenha **Modo simulação** ligado no primeiro teste;
 6. inicie o daemon, envie uma mensagem nova e acompanhe a fila;
 7. somente depois de validar o fluxo, pare o daemon, desligue a simulação e inicie novamente.
@@ -132,12 +133,18 @@ Log sanitizado do launcher:
 
 Uma regra pode combinar:
 
-- escopo: todas, diretas, grupos ou JID exato;
+- escopo: todas, diretas, todos os grupos ou uma conversa/grupo exato;
 - tipo: todos, texto, imagem, vídeo, áudio, documento, figurinha ou outros;
+- conteúdo: qualquer conteúdo, começa com, não começa com ou uma expressão regular;
+- comparação com ou sem distinção entre maiúsculas e minúsculas;
 - ação: apagar depois de um atraso ou nunca apagar;
 - prioridade numérica.
 
-Qualquer regra `keep` correspondente é protetiva e vence regras de exclusão. Entre exclusões, prioridade e especificidade determinam a escolhida. A decisão original fica no job, mas regras protetivas também são reavaliadas imediatamente antes da chamada.
+O **nome da regra é apenas um rótulo**. Para limitar a automação, selecione o grupo no campo de escopo; escrever o nome do grupo no nome da regra não cria esse vínculo.
+
+Qualquer regra `keep` correspondente é protetiva e vence regras de exclusão. Entre exclusões, prioridade e especificidade determinam a escolhida. Se nenhuma regra combinar, a mensagem é mantida. A decisão original fica no job, mas regras protetivas compatíveis com os dados disponíveis também são reavaliadas imediatamente antes da chamada.
+
+O padrão da expressão regular deve ser informado sem barras delimitadoras. Por exemplo, `^(temporario|rascunho):` combina textos que começam com `temporario:` ou `rascunho:`. A avaliação usa RE2 para garantir tempo linear; recursos de backtracking como lookaround e backreferences não são aceitos.
 
 O painel limita atrasos a **47 horas**, deixando margem dentro da janela aproximada de dois dias usada pelo WhatsApp para “Apagar para todos”.
 
@@ -160,7 +167,7 @@ O painel limita atrasos a **47 horas**, deixando margem dentro da janela aproxim
 
 | Dado | Persistido? | Onde |
 | --- | ---: | --- |
-| Texto e mídia da mensagem | Não pelo WhatsErase | Apenas transitam pelo webhook em memória |
+| Texto e mídia da mensagem | Não pelo WhatsErase | O texto/caption pode ser comparado pelas regras, somente em memória |
 | ID da mensagem, JID, participante, tipo e horários | Sim | PostgreSQL do app |
 | Regras, configuração e jobs | Sim | PostgreSQL do app |
 | Logs operacionais sanitizados | Sim, até 2.000 eventos | PostgreSQL do app |

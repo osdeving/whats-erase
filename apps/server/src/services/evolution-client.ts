@@ -177,6 +177,14 @@ export class EvolutionClient {
     return this.request(`/webhook/find/${encodeURIComponent(this.connection.instanceName)}`);
   }
 
+  async fetchGroups() {
+    return this.request(
+      `/group/fetchAllGroups/${encodeURIComponent(this.connection.instanceName)}?getParticipants=false`,
+      {},
+      60_000,
+    );
+  }
+
   async deleteForEveryone(key: DeleteKey) {
     const body: Record<string, unknown> = {
       id: key.id,
@@ -189,6 +197,51 @@ export class EvolutionClient {
       body: JSON.stringify(body),
     });
   }
+}
+
+export interface EvolutionGroupSummary {
+  jid: string;
+  name: string;
+  participantCount: number | null;
+}
+
+/** Reduz a resposta ampla da Evolution aos tres campos necessarios pela UI. */
+export function extractGroups(payload: unknown): EvolutionGroupSummary[] {
+  let items: unknown[] | null = null;
+  if (Array.isArray(payload)) {
+    items = payload;
+  } else if (payload && typeof payload === 'object') {
+    const root = payload as Record<string, unknown>;
+    if (Array.isArray(root.data)) items = root.data;
+    else if (Array.isArray(root.groups)) items = root.groups;
+  }
+  if (items === null) {
+    throw new EvolutionError(
+      'A Evolution retornou uma resposta inesperada ao listar os grupos.',
+      502,
+      'EVOLUTION_INVALID_GROUPS_RESPONSE',
+      false,
+      false,
+    );
+  }
+
+  const byJid = new Map<string, EvolutionGroupSummary>();
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue;
+    const group = item as Record<string, unknown>;
+    const jid = [group.id, group.jid, group.remoteJid].find(
+      (value): value is string => typeof value === 'string' && value.endsWith('@g.us'),
+    );
+    if (!jid) continue;
+    const rawName = [group.subject, group.name].find((value): value is string => typeof value === 'string');
+    const name = rawName?.trim().slice(0, 200) || 'Grupo sem nome';
+    const rawCount = group.size ?? group.participantCount;
+    const participantCount = typeof rawCount === 'number' && Number.isFinite(rawCount) && rawCount >= 0
+      ? Math.trunc(rawCount)
+      : null;
+    byJid.set(jid, { jid, name, participantCount });
+  }
+  return [...byJid.values()].sort((left, right) => left.name.localeCompare(right.name, 'pt-BR'));
 }
 
 export function extractQrCode(payload: unknown): string | null {
