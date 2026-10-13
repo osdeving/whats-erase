@@ -31,7 +31,7 @@
     "start": "npm run start -w @whats-erase/server"
   },
   "devDependencies": {
-    "concurrently": "^9.2.1",
+    "concurrently": "^9.2.5",
     "markdownlint-cli2": "^0.23.3"
   },
   "engines": {
